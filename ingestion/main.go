@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net/url"
@@ -9,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gorilla/websocket"
+	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -22,6 +24,27 @@ func main() {
 	})
 
 	ctx := context.Background()
+
+	// ── TimescaleDB (optional but recommended for backfill signaling) ─────────
+	dsn := os.Getenv("TIMESCALEDB_DSN")
+	var pg *sql.DB
+	if dsn == "" {
+		log.Println("TIMESCALEDB_DSN not set; backfill_status signaling is disabled")
+	} else {
+		var err error
+		pg, err = sql.Open("postgres", dsn)
+		if err != nil {
+			log.Fatalf("Failed to open TimescaleDB connection: %v", err)
+		}
+		if err := pg.Ping(); err != nil {
+			log.Fatalf("Failed to ping TimescaleDB: %v", err)
+		}
+		if err := ensureBackfillStatusTable(pg); err != nil {
+			log.Fatalf("Failed to ensure backfill_status table: %v", err)
+		}
+		defer pg.Close()
+		log.Println("Connected to TimescaleDB for backfill signaling")
+	}
 
 	pong, err := rdb.Ping(ctx).Result()
 	if err != nil {
@@ -56,7 +79,7 @@ func main() {
 	// the kernel TCP buffer while we push historical data. Any overlap
 	// between the tail of the REST data and early WebSocket candles is
 	// deduplicated by the downstream DB layer (ON CONFLICT DO NOTHING).
-	go backfillHistorical(ctx, rdb)
+	go backfillHistorical(ctx, rdb, pg)
 
 	// ── WebSocket consume loop ───────────────────────────────────────
 	for {

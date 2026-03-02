@@ -4,8 +4,12 @@ services:
       context: ../ingestion
     environment:
       - REDIS_ADDR=redis:6379
+      - TIMESCALEDB_DSN=postgresql://postgres:postgres@timescaledb:5432/portfolio?sslmode=disable
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      timescaledb:
+        condition: service_healthy
 
   redis:
     image: redis:7-alpine
@@ -35,5 +39,14 @@ services:
     depends_on:
       redis:
         condition: service_started
+      timescaledb:
+        condition: service_healthy
+
+  forecasting:
+    build:
+      context: ../forecasting
+    environment:
+      - TIMESCALEDB_DSN=postgresql://postgres:postgres@timescaledb:5432/portfolio
+    depends_on:
       timescaledb:
         condition: service_healthy

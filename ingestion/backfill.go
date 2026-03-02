@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -20,7 +21,7 @@ import (
 // backfillHistorical fetches up to 1500 closed 1-minute candles per symbol
 // from the Binance Futures REST API and publishes them to the Redis stream
 // so downstream services (feature engineering) can warm up immediately.
-func backfillHistorical(ctx context.Context, rdb *redis.Client) {
+func backfillHistorical(ctx context.Context, rdb *redis.Client, pg *sql.DB) {
 	const (
 		baseURL  = "https://fapi.binance.com/fapi/v1/klines"
 		interval = "1m"
@@ -30,6 +31,10 @@ func backfillHistorical(ctx context.Context, rdb *redis.Client) {
 	client := &http.Client{Timeout: 30 * time.Second}
 
 	for _, symbol := range symbols {
+		if err := setBackfillStatus(pg, symbol, "in_progress"); err != nil {
+			log.Printf("[backfill] failed to set in_progress for %s: %v", symbol, err)
+		}
+
 		// Set endTime to just before the current minute so every returned
 		// candle is guaranteed to be closed.
 		endTime := time.Now().UTC().Truncate(time.Minute).UnixMilli() - 1
@@ -42,6 +47,9 @@ func backfillHistorical(ctx context.Context, rdb *redis.Client) {
 		body, err := retryableGet(client, apiURL)
 		if err != nil {
 			log.Printf("[backfill] giving up on %s: %v", symbol, err)
+			if setErr := setBackfillStatus(pg, symbol, "failed"); setErr != nil {
+				log.Printf("[backfill] failed to set failed status for %s: %v", symbol, setErr)
+			}
 			continue
 		}
 
@@ -123,7 +131,37 @@ func backfillHistorical(ctx context.Context, rdb *redis.Client) {
 		}
 
 		log.Printf("[backfill] %s — published %d historical candles", symbol, published)
+		if err := setBackfillStatus(pg, symbol, "done"); err != nil {
+			log.Printf("[backfill] failed to set done status for %s: %v", symbol, err)
+		}
 	}
 
 	log.Println("[backfill] Historical backfill complete.")
+}
+
+func ensureBackfillStatusTable(pg *sql.DB) error {
+	if pg == nil {
+		return nil
+	}
+	_, err := pg.Exec(`
+		CREATE TABLE IF NOT EXISTS backfill_status (
+			symbol TEXT PRIMARY KEY,
+			status TEXT NOT NULL,
+			completed_at TIMESTAMPTZ NOT NULL
+		);
+	`)
+	return err
+}
+
+func setBackfillStatus(pg *sql.DB, symbol, status string) error {
+	if pg == nil {
+		return nil
+	}
+	_, err := pg.Exec(`
+		INSERT INTO backfill_status (symbol, status, completed_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (symbol)
+		DO UPDATE SET status = EXCLUDED.status, completed_at = NOW();
+	`, symbol, status)
+	return err
 }
