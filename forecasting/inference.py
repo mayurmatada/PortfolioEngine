@@ -10,8 +10,9 @@ from db import (
     fetch_unforecasted_features,
     insert_forecasts,
     update_realized_vol,
+    write_rolling_model_metrics,
 )
-from config import SYMBOLS, FORWARD_WINDOW
+from config import SYMBOLS, FORWARD_WINDOW, ROLLING_LOSS_POINTS
 from labels import compute_forward_realized_vol
 
 logger = logging.getLogger("forecasting.inference")
@@ -28,6 +29,7 @@ def run_inference(conn, models):
         df = fetch_unforecasted_features(conn, symbol)
         if df.empty:
             _backfill_realized_vol(conn, symbol)
+            _update_rolling_losses(conn, symbol)
             continue
 
         garch = model_bundle["garch"]
@@ -40,6 +42,7 @@ def run_inference(conn, models):
         if not valid_mask.any():
             logger.warning("No valid feature rows for %s in this inference batch", symbol)
             _backfill_realized_vol(conn, symbol)
+            _update_rolling_losses(conn, symbol)
             continue
 
         valid_df = df.loc[valid_mask].copy()
@@ -68,6 +71,7 @@ def run_inference(conn, models):
         logger.info("inference symbol=%s rows=%d latency_ms=%.1f", symbol, len(preds), latency_ms)
 
         _backfill_realized_vol(conn, symbol)
+        _update_rolling_losses(conn, symbol)
 
 
 def _backfill_realized_vol(conn, symbol):
@@ -92,3 +96,7 @@ def _backfill_realized_vol(conn, symbol):
         updates.append((float(value), ts, symbol))
 
     update_realized_vol(conn, updates)
+
+
+def _update_rolling_losses(conn, symbol):
+    write_rolling_model_metrics(conn, symbol=symbol, window_points=ROLLING_LOSS_POINTS)

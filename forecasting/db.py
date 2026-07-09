@@ -134,6 +134,32 @@ def ensure_tables(conn):
             CREATE INDEX IF NOT EXISTS idx_forecasts_symbol_time
             ON forecasts (symbol, time DESC);
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS model_metrics (
+                time TIMESTAMPTZ NOT NULL,
+                symbol TEXT NOT NULL,
+                garch_mse DOUBLE PRECISION,
+                garch_qlike DOUBLE PRECISION,
+                xgb_mse DOUBLE PRECISION,
+                xgb_qlike DOUBLE PRECISION,
+                garch_samples INTEGER NOT NULL DEFAULT 0,
+                xgb_samples INTEGER NOT NULL DEFAULT 0,
+                window_points INTEGER NOT NULL,
+                PRIMARY KEY (symbol, time)
+            );
+        """)
+        cur.execute("""
+            SELECT EXISTS (
+                SELECT 1 FROM timescaledb_information.hypertables
+                WHERE hypertable_name = 'model_metrics'
+            );
+        """)
+        if not cur.fetchone()[0]:
+            cur.execute("SELECT create_hypertable('model_metrics', 'time', if_not_exists => TRUE);")
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_model_metrics_symbol_time
+            ON model_metrics (symbol, time DESC);
+        """)
     logger.info("Forecasts table ensured.")
 
 
@@ -228,3 +254,70 @@ def update_realized_vol(conn, rows):
             rows,
         )
     logger.info("Updated realized_vol for %d forecast rows.", len(rows))
+
+
+def write_rolling_model_metrics(conn, symbol, window_points, eps: float = 1e-12):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH recent AS (
+                SELECT realized_vol, garch_vol, xgb_vol
+                FROM forecasts
+                WHERE symbol = %s
+                  AND realized_vol IS NOT NULL
+                ORDER BY time DESC
+                LIMIT %s
+            ),
+            agg AS (
+                SELECT
+                    COUNT(*) FILTER (WHERE garch_vol IS NOT NULL) AS garch_samples,
+                    AVG(POWER(realized_vol - garch_vol, 2)) FILTER (WHERE garch_vol IS NOT NULL) AS garch_mse,
+                    AVG(
+                        LN(GREATEST(POWER(garch_vol, 2), %s))
+                        + (GREATEST(POWER(realized_vol, 2), %s) / GREATEST(POWER(garch_vol, 2), %s))
+                    ) FILTER (WHERE garch_vol IS NOT NULL) AS garch_qlike,
+                    COUNT(*) FILTER (WHERE xgb_vol IS NOT NULL) AS xgb_samples,
+                    AVG(POWER(realized_vol - xgb_vol, 2)) FILTER (WHERE xgb_vol IS NOT NULL) AS xgb_mse,
+                    AVG(
+                        LN(GREATEST(POWER(xgb_vol, 2), %s))
+                        + (GREATEST(POWER(realized_vol, 2), %s) / GREATEST(POWER(xgb_vol, 2), %s))
+                    ) FILTER (WHERE xgb_vol IS NOT NULL) AS xgb_qlike
+                FROM recent
+            )
+            INSERT INTO model_metrics (
+                time,
+                symbol,
+                garch_mse,
+                garch_qlike,
+                xgb_mse,
+                xgb_qlike,
+                garch_samples,
+                xgb_samples,
+                window_points
+            )
+            SELECT
+                NOW(),
+                %s,
+                garch_mse,
+                garch_qlike,
+                xgb_mse,
+                xgb_qlike,
+                COALESCE(garch_samples, 0),
+                COALESCE(xgb_samples, 0),
+                %s
+            FROM agg
+            WHERE COALESCE(garch_samples, 0) > 0 OR COALESCE(xgb_samples, 0) > 0
+            """,
+            (
+                symbol,
+                int(window_points),
+                eps,
+                eps,
+                eps,
+                eps,
+                eps,
+                eps,
+                symbol,
+                int(window_points),
+            ),
+        )

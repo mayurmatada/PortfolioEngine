@@ -50,3 +50,34 @@ services:
     depends_on:
       timescaledb:
         condition: service_healthy
+
+  portfolio_engine:
+    build:
+      context: ../portfolio_engine
+    environment:
+      - REDIS_ADDR=redis:6379
+      - TIMESCALEDB_DSN=postgresql://postgres:postgres@timescaledb:5432/portfolio
+    depends_on:
+      redis:
+        condition: service_started
+      timescaledb:
+        condition: service_healthy
+
+  api_gateway:
+    build:
+      context: ../api_gateway
+    environment:
+      - API_ADDR=:8080
+      - REDIS_ADDR=redis:6379
+      - TIMESCALEDB_DSN=postgresql://postgres:postgres@timescaledb:5432/portfolio?sslmode=disable
+      - SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT
+      - KLINE_STREAM=kline_stream
+      - PORTFOLIO_STREAM=portfolio_state_stream
+      - PORTFOLIO_LATEST_KEY=portfolio:latest
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_started
+      timescaledb:
+        condition: service_healthy

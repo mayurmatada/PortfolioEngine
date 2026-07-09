@@ -25,3 +25,6 @@ TRAINING_PARTIAL_RETRY_SECONDS = int(os.environ.get("TRAINING_PARTIAL_RETRY_SECO
 
 # Forward window for realized volatility label (minutes)
 FORWARD_WINDOW = 5
+
+# Number of most recent realized forecast rows used to compute rolling losses.
+ROLLING_LOSS_POINTS = int(os.environ.get("ROLLING_LOSS_POINTS", "500"))
